@@ -1,6 +1,6 @@
 {
   "name": "shrk-neo",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Pass JS objects between Node.js worker processes straight from SharedArrayBuffer — no JSON, no IPC/network, zero-copy buffers. powered by vexify",
   "license": "Apache-2.0",
   "author": "vexify",
@@ -20,7 +20,7 @@
     "node": ">=18.0.0"
   },
   "scripts": {
-    "test": "node --test test/shared-memory.test.js",
+    "test": "node --test test/shared-memory.test.js test/features.test.js",
     "example": "node examples/main.js"
   },
   "keywords": [

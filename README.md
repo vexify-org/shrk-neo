@@ -13,6 +13,15 @@ the very same memory. Writers and readers touch the memory directly with
 `Atomics`-guarded lock-free operations — there is no pipe, no socket, no
 `postMessage` involved in moving the data.
 
+It ships four primitives:
+
+| primitive | purpose |
+| --- | --- |
+| `SharedMemory` | key/value object store (`set`/`get`/`wait`) |
+| `SharedBus` | lock-free message queue / mailbox (`send`/`receive`) |
+| `SharedCounter` | atomic 32-bit counter (`inc`/`dec`/`reset`) |
+| `SharedLock` | cross-worker mutex (`lock`/`unlock`/`withLock`) |
+
 ## Why "no serialization"?
 
 - **Buffer / typed-array / ArrayBuffer values** are copied once into the
@@ -119,6 +128,109 @@ thread's event loop, so prefer calling it inside a worker.
 
 Non-blocking `wait` for the main thread, built on `Atomics.waitAsync`
 (Node.js ≥ 16.17).
+
+### `stats() → { slots, liveKeys, freeSlots, bytesUsed, bytesCapacity }`
+
+Usage stats for the region. `bytesUsed` is the allocator's high-water mark
+since the last `clear()`.
+
+## `SharedBus` — message queue
+
+```js
+const bus = new SharedBus({ size: 4 * 1024 * 1024, slots: 128 })
+// main → workers
+bus.send({ job: 'render', frames: [1, 2, 3] })
+bus.send(Buffer.alloc(64 * 1024)) // raw bytes, zero-copy on receive
+// …and from a worker:
+bus.send({ result: 'ok' })
+```
+
+```js
+// worker.js
+const bus = SharedBus.attach(workerData.busSab)
+const job = bus.receive(5000)      // blocking receive (use inside a worker)
+const next = bus.tryReceive()      // never blocks, undefined if empty
+const also = await bus.receiveAsync(5000) // non-blocking, for the main thread
+```
+
+### `new SharedBus(options?)`
+
+| option | default | description |
+| --- | --- | --- |
+| `size` | `1 * 1024 * 1024` | total bytes of the region |
+| `slots` | `64` | number of message slots |
+
+Each slot owns a fixed `capacity = (size - header) / slots` bytes, so space is
+reclaimed the instant a consumer claims a message. A payload bigger than
+`capacity` throws (`message too large`).
+
+### `send(value) → this`
+
+Publishes a message. Objects are v8-encoded; Buffer / typed-array /
+ArrayBuffer values are stored raw. Throws when every slot is busy (bounded
+queue).
+
+### `tryReceive(options?) → value | undefined`
+
+Non-blocking receive; `undefined` when empty.
+
+### `receive(timeoutMs?, options?) → value | undefined`
+
+Blocking receive (Atomics.wait, no busy loop). Blocks the calling thread's
+event loop — use it in workers, `receiveAsync` on the main thread.
+
+### `receiveAsync(timeoutMs?, options?) → Promise<value | undefined>`
+
+Main-thread-friendly blocking receive via `Atomics.waitAsync`.
+
+### `pending` / `empty` / `clear()`
+
+`pending` counts queued + in-flight messages; `empty` is `pending === 0`;
+`clear()` drops everything.
+
+Like `SharedMemory.get`, Buffer values are returned as zero-copy views by
+default (`{ copy: true }` for a snapshot). Because a slot is freed as soon as
+it is consumed, a zero-copy message's bytes may be reused by a later `send` —
+process it promptly or use `copy: true`.
+
+## `SharedCounter` — atomic counter
+
+```js
+const counter = new SharedCounter({ initial: 0 })       // main
+// in a worker: SharedCounter.attach(workerData.counterSab)
+
+counter.inc()    // +1, returns new value
+counter.inc(5)   // +5, returns new value
+counter.dec(2)   // -2, returns new value
+counter.value    // current value (atomic load)
+counter.reset(0) // store a new value
+```
+
+Useful for progress meters, per-worker credits, or aggregate statistics
+across processes. `inc`/`dec` are `Atomics.add` — safe from many workers at
+once.
+
+## `SharedLock` — mutex
+
+```js
+const lock = new SharedLock()               // main
+// in a worker: SharedLock.attach(workerData.lockSab)
+
+lock.lock()
+try {
+  // critical section, exclusive across all workers
+} finally {
+  lock.unlock()
+}
+
+lock.withLock(() => { /* same, with auto-release */ })
+lock.tryLock()   // true/false, never blocks
+lock.locked      // is anyone holding it?
+```
+
+`lock()` blocks the calling thread via `Atomics.wait` (use inside workers).
+It is *not* owner-checked — anyone with access can `unlock()`. Pair it with a
+`SharedCounter` for classic producer/consumer critical sections.
 
 ## Semantics & caveats
 
